@@ -1,0 +1,50 @@
+# Project Structure
+
+Softablitz/
+├── Abstract.md
+├── GhostCoders_2026_SoftaBlitz_2026.pdf
+├── Readme.md
+├── Structure.md
+└── slingring/
+    ├── pom.xml
+    ├── src/
+    │   ├── main/
+    │   │   ├── java/
+    │   │   │   └── com/
+    │   │   │       └── slingring/
+    │   │   │           ├── App.java
+    │   │   │           ├── Launcher.java
+    │   │   │           ├── discovery/
+    │   │   │           │   ├── DiscoveryService.java
+    │   │   │           │   └── PeerRegistry.java
+    │   │   │           ├── event/
+    │   │   │           │   └── EventBus.java
+    │   │   │           ├── model/
+    │   │   │           │   ├── Decision.java
+    │   │   │           │   ├── Peer.java
+    │   │   │           │   ├── TransferRequest.java
+    │   │   │           │   ├── TransferSession.java
+    │   │   │           │   ├── TransferState.java
+    │   │   │           │   └── Wire.java
+    │   │   │           ├── net/
+    │   │   │           │   ├── PeerClient.java
+    │   │   │           │   └── PeerServer.java
+    │   │   │           ├── storage/
+    │   │   │           │   └── HistoryStore.java
+    │   │   │           ├── transfer/
+    │   │   │           │   ├── ProgressTracker.java
+    │   │   │           │   ├── ReceiveService.java
+    │   │   │           │   ├── SendService.java
+    │   │   │           │   └── TransferSessionRegistry.java
+    │   │   │           ├── ui/
+    │   │   │           │   └── (currently empty placeholder for UI classes)
+    │   │   │           └── util/
+    │   │   │               ├── CheckSumUtil.java
+    │   │   │               └── FileNames.java
+    │   │   └── resources/
+    │   │       └── (currently empty in the repo; JavaFX resources can be added here)
+    │   └── test/
+    │       └── java/
+    │           └── (no source test files present yet)
+    └── target/
+        └── generated Maven build artifacts and compiled classes
