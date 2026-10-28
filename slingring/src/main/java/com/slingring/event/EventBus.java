@@ -1,7 +1,5 @@
 package com.slingring.event;
 
-import javafx.application.Platform;
-
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -10,12 +8,12 @@ import java.util.function.Consumer;
 
 /**
  * Small in-process publish/subscribe hub (observer pattern).
- * Services publish events from worker threads; the UI subscribes and updates itself.
+ * Services publish events from worker threads; the UI layer subscribes and forwards them to the screen.
  *
  * Design choices:
  *  - Events are identified by a string type and carry an Object payload (kept simple on purpose).
  *  - publish() runs listeners on the calling thread, so listeners must be quick.
- *    UI listeners should use {@link #subscribeOnUi}, which hops to the JavaFX thread.
+ *    Slow listeners (for example, ones that write to a network client) should hand work to an executor.
  *  - One failing listener never stops the others or the publisher.
  *  - Thread-safe: subscribe, unsubscribe and publish can run concurrently.
  */
@@ -57,14 +55,6 @@ public class EventBus {
         });
     }
 
-    /**
-     * Receive events on the JavaFX Application Thread. Use this for anything that
-     * touches controls (labels, lists, progress bars).
-     */
-    public <T> Subscription subscribeOnUi(String type, Class<T> payloadType, Consumer<T> listener) {
-        return subscribe(type, payloadType, payload -> runOnUi(() -> listener.accept(payload)));
-    }
-
     /** Deliver an event to every current subscriber of this type. */
     public void publish(String type, Object payload) {
         List<Consumer<Object>> list = listeners.get(type);
@@ -83,18 +73,5 @@ public class EventBus {
     /** Drop all listeners (used on shutdown and in tests). */
     public void clear() {
         listeners.clear();
-    }
-
-    private static void runOnUi(Runnable task) {
-        try {
-            if (Platform.isFxApplicationThread()) {
-                task.run();
-            } else {
-                Platform.runLater(task);
-            }
-        } catch (IllegalStateException toolkitNotRunning) {
-            // JavaFX is not started (e.g. unit tests): run directly so logic stays testable.
-            task.run();
-        }
     }
 }

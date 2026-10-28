@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SlingRing | Local Transfer</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font: 15px/1.5 "Segoe UI", system-ui, sans-serif;
+      background: #10131b;
+      color: #e8ebf3;
+      --panel: #191e29;
+      --line: #2b3342;
+      --muted: #9ca7ba;
+      --accent: #9b8cff;
+      --green: #63d6a0;
+      --red: #ff8290;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; }
+    header {
+      border-bottom: 1px solid var(--line);
+      padding: 22px max(22px, calc((100% - 1080px) / 2));
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      background: #141822;
+    }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: 21px; letter-spacing: .2px; }
+    h2 { font-size: 16px; margin-bottom: 15px; }
+    main { max-width: 1080px; margin: 26px auto; padding: 0 22px 40px; }
+    .subtle, small { color: var(--muted); }
+    .badge { border: 1px solid var(--line); padding: 5px 10px; border-radius: 999px; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 19px; }
+    .wide { grid-column: 1 / -1; }
+    form { display: grid; gap: 11px; }
+    .form-row { display: flex; gap: 9px; align-items: center; }
+    input, select, button {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 10px 11px;
+      color: inherit;
+      background: #11151e;
+      font: inherit;
+    }
+    input, select { width: 100%; min-width: 0; }
+    button { cursor: pointer; white-space: nowrap; background: #27233d; border-color: #49406e; }
+    button:hover { border-color: var(--accent); }
+    button.secondary { background: #202633; border-color: var(--line); }
+    button.danger { background: #38212a; border-color: #63313d; }
+    button:disabled { opacity: .5; cursor: default; }
+    .list { display: grid; gap: 10px; }
+    .item { border-top: 1px solid var(--line); padding-top: 12px; }
+    .item:first-child { border-top: 0; padding-top: 0; }
+    .item-head { display: flex; justify-content: space-between; gap: 10px; align-items: start; }
+    .actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+    .actions button { padding: 6px 9px; font-size: 13px; }
+    progress { width: 100%; height: 8px; margin-top: 9px; accent-color: var(--accent); }
+    .empty { color: var(--muted); padding: 5px 0; }
+    #notice { display: none; margin-bottom: 16px; padding: 11px 13px; border-radius: 8px; }
+    #notice.error { display: block; color: #ffd9de; background: #38212a; border: 1px solid #63313d; }
+    #notice.info { display: block; color: #d7ceff; background: #25213a; border: 1px solid #49406e; }
+    .history-line { display: grid; grid-template-columns: 1fr auto; gap: 5px 14px; }
+    @media (max-width: 700px) {
+      .grid { grid-template-columns: 1fr; }
+      .wide { grid-column: auto; }
+      header { align-items: start; flex-direction: column; }
+      .form-row { align-items: stretch; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>SlingRing</h1>
+      <p class="subtle">Local transfer test console</p>
+    </div>
+    <span class="badge" id="device">Connecting…</span>
+  </header>
+  <main>
+    <div id="notice"></div>
+    <div class="grid">
+      <section class="panel">
+        <h2>Nearby devices</h2>
+        <div id="peers" class="list"><p class="empty">Looking for devices…</p></div>
+        <form id="manual-peer" style="margin-top:16px">
+          <strong>Add device manually</strong>
+          <div class="form-row">
+            <input name="ip" placeholder="Device IP address" required>
+            <input name="port" type="number" min="1" max="65535" value="8765" required style="max-width:120px">
+            <button type="submit">Connect</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>Send a file</h2>
+        <form id="send-form">
+          <label for="peer-select">Send to</label>
+          <select id="peer-select" required><option value="">No devices available</option></select>
+          <label for="file-path">Full file path on this computer</label>
+          <input id="file-path" placeholder="C:\Users\you\Desktop\file.zip" required>
+          <small>This test UI sends by path; enter the path accessible to the SlingRing process.</small>
+          <button type="submit">Start transfer</button>
+        </form>
+      </section>
+
+      <section class="panel wide">
+        <div class="item-head">
+          <h2>Transfers</h2>
+          <small id="refresh-status">Refreshes every 1.5 seconds</small>
+        </div>
+        <div id="transfers" class="list"><p class="empty">No transfers yet.</p></div>
+      </section>
+
+      <section class="panel wide">
+        <div class="item-head">
+          <h2>Recent history</h2>
+          <button class="secondary" id="refresh-history" type="button">Refresh</button>
+        </div>
+        <div id="history" class="list"><p class="empty">Loading history…</p></div>
+      </section>
+    </div>
+  </main>
+  <script>
+    const token = __UI_TOKEN__;
+    const headers = { Authorization: `Bearer ${token}` };
+    const $ = (id) => document.getElementById(id);
+    let currentState;
+    let noticeTimer;
+
+    function notice(message, isError = false) {
+      const box = $("notice");
+      box.textContent = message;
+      box.className = isError ? "error" : "info";
+      clearTimeout(noticeTimer);
+      noticeTimer = setTimeout(() => { box.style.display = "none"; }, 6000);
+    }
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: { ...headers, ...(options.body ? { "Content-Type": "application/json" } : {}), ...options.headers }
+      });
+      if (!response.ok) {
+        let message = `Request failed (${response.status})`;
+        try { message = (await response.json()).error || message; } catch (_) {}
+        throw new Error(message);
+      }
+      if (response.status === 204) return null;
+      return response.json();
+    }
+
+    function text(tag, value, className) {
+      const node = document.createElement(tag);
+      node.textContent = value == null ? "" : value;
+      if (className) node.className = className;
+      return node;
+    }
+
+    function button(label, action, style = "secondary") {
+      const node = text("button", label);
+      node.type = "button";
+      node.className = style;
+      node.addEventListener("click", action);
+      return node;
+    }
+
+    async function action(path, body) {
+      try {
+        await api(path, { method: "POST", ...(body ? { body: JSON.stringify(body) } : {}) });
+        notice("Request completed.");
+        await refresh();
+      } catch (error) {
+        notice(error.message, true);
+      }
+    }
+
+    function renderPeers(peers) {
+      const list = $("peers");
+      const select = $("peer-select");
+      const selectedPeer = select.value;
+      list.replaceChildren();
+      select.replaceChildren(new Option(peers.length ? "Choose a device…" : "No devices available", ""));
+      if (!peers.length) list.append(text("p", "No devices discovered yet.", "empty"));
+      for (const peer of peers) {
+        const row = document.createElement("div");
+        row.className = "item";
+        const info = document.createElement("div");
+        info.append(text("strong", peer.name), text("div", `${peer.ip}:${peer.port}`, "subtle"));
+        row.append(info);
+        list.append(row);
+        const option = new Option(`${peer.name} (${peer.ip})`, peer.id);
+        option.selected = peer.id === selectedPeer;
+        select.add(option);
+      }
+    }
+
+    function renderTransfers(sessions) {
+      const list = $("transfers");
+      list.replaceChildren();
+      if (!sessions.length) {
+        list.append(text("p", "No transfers yet.", "empty"));
+        return;
+      }
+      for (const transfer of sessions) {
+        const row = document.createElement("div");
+        row.className = "item";
+        const title = document.createElement("div");
+        title.className = "item-head";
+        title.append(text("strong", transfer.fileName));
+        title.append(text("span", `${transfer.state} · ${transfer.direction === "SENDING" ? "to" : "from"} ${transfer.peerName}`, "subtle"));
+        row.append(title);
+        const detail = transfer.detail || `${formatBytes(transfer.bytesTransferred)} of ${formatBytes(transfer.size)}`;
+        row.append(text("small", detail));
+        if (!["INTACT", "CORRUPTED", "REFUSED", "CANCELLED", "FAILED"].includes(transfer.state)) {
+          const progress = document.createElement("progress");
+          progress.max = Math.max(1, transfer.size);
+          progress.value = transfer.bytesTransferred;
+          row.append(progress);
+        }
+        const actions = document.createElement("div");
+        actions.className = "actions";
+        if (transfer.direction === "RECEIVING" && transfer.state === "PENDING") {
+          actions.append(button("Accept…", () => {
+            const dir = prompt("Folder to save the incoming file:");
+            if (dir && dir.trim()) action(`/api/transfers/${encodeURIComponent(transfer.id)}/accept`, { saveDir: dir.trim() });
+          }, ""));
+          actions.append(button("Refuse", () => action(`/api/transfers/${encodeURIComponent(transfer.id)}/refuse`), "danger"));
+        }
+        if (!["INTACT", "CORRUPTED", "REFUSED", "CANCELLED", "FAILED"].includes(transfer.state)) {
+          actions.append(button("Cancel", () => action(`/api/transfers/${encodeURIComponent(transfer.id)}/cancel`), "danger"));
+        }
+        if (actions.childElementCount) row.append(actions);
+        list.append(row);
+      }
+    }
+
+    function formatBytes(bytes) {
+      if (!Number.isFinite(bytes) || bytes < 1024) return `${bytes || 0} B`;
+      const units = ["KB", "MB", "GB", "TB"];
+      let size = bytes / 1024;
+      let unit = 0;
+      while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit++; }
+      return `${size.toFixed(1)} ${units[unit]}`;
+    }
+
+    async function refresh() {
+      try {
+        currentState = await api("/api/state");
+        $("device").textContent = `${currentState.deviceName} · ${currentState.deviceId.slice(0, 8)}`;
+        renderPeers(currentState.peers);
+        renderTransfers(currentState.sessions);
+        if (currentState.discoveryError) notice(`Device discovery warning: ${currentState.discoveryError}`, true);
+      } catch (error) {
+        $("device").textContent = "Disconnected";
+        $("refresh-status").textContent = "Retrying…";
+        notice(error.message, true);
+      }
+    }
+
+    async function refreshHistory() {
+      try {
+        const entries = await api("/api/history");
+        const list = $("history");
+        list.replaceChildren();
+        if (!entries.length) list.append(text("p", "No completed transfers yet.", "empty"));
+        for (const entry of entries) {
+          const row = document.createElement("div");
+          row.className = "item history-line";
+          row.append(text("strong", entry.fileName));
+          row.append(text("span", entry.state, "subtle"));
+          row.append(text("small", `${entry.direction} · ${entry.peerName} · ${formatBytes(entry.size)}`, "subtle"));
+          row.append(text("small", new Date(entry.timestamp).toLocaleString(), "subtle"));
+          list.append(row);
+        }
+      } catch (error) {
+        $("history").replaceChildren(text("p", error.message, "empty"));
+      }
+    }
+
+    $("manual-peer").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      try {
+        const peer = await api("/api/peers/manual", {
+          method: "POST",
+          body: JSON.stringify({ ip: form.get("ip"), port: Number(form.get("port")) })
+        });
+        notice(`Connected to ${peer.name}.`);
+        event.currentTarget.reset();
+        await refresh();
+      } catch (error) {
+        notice(error.message, true);
+      }
+    });
+
+    $("send-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        await api("/api/send", {
+          method: "POST",
+          body: JSON.stringify({ path: $("file-path").value.trim(), peerId: $("peer-select").value })
+        });
+        notice("Transfer started.");
+        await refresh();
+      } catch (error) {
+        notice(error.message, true);
+      }
+    });
+
+    $("refresh-history").addEventListener("click", refreshHistory);
+    refresh();
+    refreshHistory();
+    setInterval(refresh, 1500);
+    setInterval(refreshHistory, 10000);
+  </script>
+</body>
+</html>

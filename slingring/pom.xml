@@ -9,19 +9,16 @@
 
     <properties>
         <maven.compiler.release>21</maven.compiler.release>
-        <javafx.version>21.0.5</javafx.version>
     </properties>
 
     <dependencies>
+        <!-- Source:
+        https://mvnrepository.com/artifact/org.apache.maven.plugins/maven-assembly-plugin -->
         <dependency>
-            <groupId>org.openjfx</groupId>
-            <artifactId>javafx-controls</artifactId>
-            <version>${javafx.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.openjfx</groupId>
-            <artifactId>javafx-fxml</artifactId>
-            <version>${javafx.version}</version>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-assembly-plugin</artifactId>
+            <version>3.8.0</version>
+            <scope>compile</scope>
         </dependency>
         <dependency>
             <groupId>org.jmdns</groupId>
@@ -44,12 +41,36 @@
     <build>
         <plugins>
             <plugin>
-                <groupId>org.openjfx</groupId>
-                <artifactId>javafx-maven-plugin</artifactId>
-                <version>0.0.8</version>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-assembly-plugin</artifactId>
+                <version>3.8.0</version>
                 <configuration>
-                    <mainClass>com.slingring.App</mainClass>
+                    <!-- Configures the main class for an executable JAR -->
+                    <archive>
+                        <manifest>
+                            <mainClass>com.slingring.App</mainClass>
+                        </manifest>
+                    </archive>
+                    <!-- Uses a built-in descriptor for packaging dependencies -->
+                    <descriptorRefs>
+                        <descriptorRef>jar-with-dependencies</descriptorRef>
+                    </descriptorRefs>
                 </configuration>
+                <executions>
+                    <execution>
+                        <id>make-assembly</id>
+                        <!-- Binds the assembly to the package phase -->
+                        <phase>package</phase>
+                        <goals>
+                            <goal>single</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
