@@ -15,22 +15,32 @@ import com.slingring.transfer.TransferSessionRegistry;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
+import java.awt.EventQueue;
+import java.awt.FileDialog;
+import java.awt.Frame;
+import java.awt.GraphicsEnvironment;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
+import javax.swing.JFileChooser;
+import javax.swing.JFrame;
 
 /**
  * Loopback-only, authenticated HTTP API for the desktop UI.
@@ -62,7 +72,7 @@ public class UiApiServer {
     private final HistoryStore historyStore;
     private final String deviceId;
     private final String deviceName;
-    private final String discoveryError;
+    private final Supplier<String> discoveryError;
     private final ObjectMapper mapper = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
@@ -73,7 +83,7 @@ public class UiApiServer {
             TransferSessionRegistry sessionRegistry, SendService sendService,
             ReceiveService receiveService, PeerClient peerClient,
             HistoryStore historyStore, String deviceId, String deviceName,
-            String discoveryError) {
+            Supplier<String> discoveryError) {
         if (token == null || token.isBlank()) {
             throw new IllegalArgumentException("UI API token must not be blank");
         }
@@ -87,7 +97,7 @@ public class UiApiServer {
         this.historyStore = historyStore;
         this.deviceId = deviceId;
         this.deviceName = deviceName;
-        this.discoveryError = discoveryError;
+        this.discoveryError = Objects.requireNonNull(discoveryError);
     }
 
     public void start() throws IOException {
@@ -98,6 +108,7 @@ public class UiApiServer {
                 new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 0);
         executor = Executors.newVirtualThreadPerTaskExecutor();
         server.setExecutor(executor);
+        server.createContext("/", this::handle);
         server.createContext("/api", this::handle);
         server.start();
     }
@@ -124,15 +135,26 @@ public class UiApiServer {
         try (exchange) {
             try {
                 String path = exchange.getRequestURI().getPath();
-                if (("/api/home".equals(path) || "/index.html".equals(path))
+                if (!hostAllowed(exchange))
+                    throw new HttpError(403, "Forbidden");
+                allowElectronFileOrigin(exchange);
+                if ("OPTIONS".equals(exchange.getRequestMethod())) {
+                    exchange.sendResponseHeaders(204, -1);
+                    return;
+                }
+                if (("/api/home".equals(path) || "/index.html".equals(path) || "/".equals(path))
                         && "GET".equals(exchange.getRequestMethod())) {
                     ui(exchange);
+                    return;
+                }
+                if ((path.startsWith("/ui/") || isStaticAssetPath(path))
+                        && "GET".equals(exchange.getRequestMethod())) {
+                    serveStatic(exchange, path);
                     return;
                 }
                 if (!authorized(exchange)) {
                     throw new HttpError(401, "Unauthorized");
                 }
-
                 String method = exchange.getRequestMethod();
                 if ("/api/state".equals(path) && "GET".equals(method)) {
                     state(exchange);
@@ -144,6 +166,16 @@ public class UiApiServer {
                     addPeer(exchange);
                 } else if ("/api/history".equals(path) && "GET".equals(method)) {
                     history(exchange);
+                } else if ("/api/system/paths".equals(path) && "GET".equals(method)) {
+                    systemPaths(exchange);
+                } else if ("/api/browse/file".equals(path) && "POST".equals(method)) {
+                    browseFile(exchange);
+                } else if ("/api/browse/dir".equals(path) && "POST".equals(method)) {
+                    browseDir(exchange);
+                } else if ("/api/validate/file".equals(path) && "POST".equals(method)) {
+                    validateFile(exchange);
+                } else if ("/api/validate/dir".equals(path) && "POST".equals(method)) {
+                    validateDir(exchange);
                 } else if (path.startsWith("/api/transfers/") && "POST".equals(method)) {
                     transferAction(exchange, path);
                 } else if (path.startsWith("/api/") && isKnownPath(path)) {
@@ -162,29 +194,11 @@ public class UiApiServer {
         }
     }
 
-    private void ui(HttpExchange exchange) throws IOException {
-        byte[] page;
-        try (var input = UiApiServer.class.getResourceAsStream("/ui/index.html")) {
-            if (input == null) {
-                throw new IOException("Missing UI resource: /ui/index.html");
-            }
-            String html = new String(input.readAllBytes(), StandardCharsets.UTF_8)
-                    .replace("__UI_TOKEN__", mapper.writeValueAsString(token));
-            page = html.getBytes(StandardCharsets.UTF_8);
-        }
-        exchange.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
-        exchange.getResponseHeaders().set("Cache-Control", "no-store");
-        exchange.sendResponseHeaders(200, page.length);
-        try (OutputStream output = exchange.getResponseBody()) {
-            output.write(page);
-        }
-    }
-
     private void state(HttpExchange exchange) throws IOException {
         Map<String, Object> state = new LinkedHashMap<>();
         state.put("deviceId", deviceId);
         state.put("deviceName", deviceName);
-        state.put("discoveryError", discoveryError);
+        state.put("discoveryError", discoveryError.get());
         state.put("peers", peerRegistry.all());
         state.put("sessions", sessionRegistry.views());
         send(exchange, 200, state);
@@ -230,6 +244,257 @@ public class UiApiServer {
             for (EventBus.Subscription subscription : subscriptions) {
                 subscription.close();
             }
+        }
+    }
+
+    private void ui(HttpExchange exchange) throws IOException {
+        byte[] page;
+        try (var input = UiApiServer.class.getResourceAsStream("/ui/index.html")) {
+            if (input == null) {
+                throw new IOException("Missing UI resource: /ui/index.html");
+            }
+            String html = new String(input.readAllBytes(), StandardCharsets.UTF_8)
+                    .replace("__UI_TOKEN__", mapper.writeValueAsString(token));
+            page = html.getBytes(StandardCharsets.UTF_8);
+        }
+        exchange.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
+        exchange.getResponseHeaders().set("Cache-Control", "no-store");
+        exchange.sendResponseHeaders(200, page.length);
+        try (OutputStream output = exchange.getResponseBody()) {
+            output.write(page);
+        }
+    }
+
+    private void serveStatic(HttpExchange exchange, String path) throws IOException {
+        String normalized = path.replace('\\', '/');
+        if (!normalized.startsWith("/ui/")) {
+            normalized = "/ui" + (normalized.startsWith("/") ? normalized : "/" + normalized);
+        }
+        if (normalized.contains("..")) {
+            throw new HttpError(403, "Forbidden");
+        }
+        byte[] content;
+        try (var in = UiApiServer.class.getResourceAsStream(normalized)) {
+            if (in == null) {
+                throw new HttpError(404, "Not found");
+            }
+            content = in.readAllBytes();
+        }
+        exchange.getResponseHeaders().set("Content-Type", mimeTypeFor(normalized));
+        exchange.getResponseHeaders().set("Cache-Control", "no-cache");
+        exchange.sendResponseHeaders(200, content.length);
+        try (OutputStream output = exchange.getResponseBody()) {
+            output.write(content);
+        }
+    }
+
+    private static boolean isStaticAssetPath(String path) {
+        String lower = path.toLowerCase();
+        return lower.endsWith(".css")
+                || lower.endsWith(".js")
+                || lower.endsWith(".svg")
+                || lower.endsWith(".png")
+                || lower.endsWith(".json")
+                || lower.endsWith(".ico")
+                || lower.endsWith(".woff")
+                || lower.endsWith(".woff2")
+                || lower.endsWith(".ttf");
+    }
+
+    private static String mimeTypeFor(String path) {
+        String lower = path.toLowerCase();
+        if (lower.endsWith(".css"))
+            return "text/css; charset=utf-8";
+        if (lower.endsWith(".js"))
+            return "application/javascript; charset=utf-8";
+        if (lower.endsWith(".svg"))
+            return "image/svg+xml; charset=utf-8";
+        if (lower.endsWith(".png"))
+            return "image/png";
+        if (lower.endsWith(".json"))
+            return "application/json; charset=utf-8";
+        if (lower.endsWith(".ico"))
+            return "image/x-icon";
+        if (lower.endsWith(".html"))
+            return "text/html; charset=utf-8";
+        if (lower.endsWith(".woff2"))
+            return "font/woff2";
+        if (lower.endsWith(".woff"))
+            return "font/woff";
+        if (lower.endsWith(".ttf"))
+            return "font/ttf";
+        return "application/octet-stream";
+    }
+
+    private void systemPaths(HttpExchange exchange) throws IOException {
+        String home = System.getProperty("user.home", "");
+        Path homePath = Path.of(home);
+        Path downloads = homePath.resolve("Downloads");
+        Path desktop = homePath.resolve("Desktop");
+        Path documents = homePath.resolve("Documents");
+
+        Map<String, Object> paths = new LinkedHashMap<>();
+        paths.put("home", home);
+        paths.put("downloads", Files.exists(downloads) ? downloads.toAbsolutePath().toString() : home);
+        paths.put("desktop", Files.exists(desktop) ? desktop.toAbsolutePath().toString() : home);
+        paths.put("documents", Files.exists(documents) ? documents.toAbsolutePath().toString() : home);
+        send(exchange, 200, paths);
+    }
+
+    private void validateFile(HttpExchange exchange) throws IOException {
+        JsonNode body = readJson(exchange);
+        String rawPath = body.has("path") ? body.get("path").asText("") : "";
+        if (rawPath.isBlank()) {
+            send(exchange, 200, Map.of("valid", false, "error", "Path is empty"));
+            return;
+        }
+        try {
+            Path p = Path.of(rawPath);
+            if (!Files.exists(p)) {
+                send(exchange, 200, Map.of("valid", false, "error", "File does not exist"));
+                return;
+            }
+            if (!Files.isRegularFile(p)) {
+                send(exchange, 200, Map.of("valid", false, "error", "Target is not a regular file"));
+                return;
+            }
+            if (!Files.isReadable(p)) {
+                send(exchange, 200, Map.of("valid", false, "error", "File is not readable"));
+                return;
+            }
+            long size = Files.size(p);
+            String name = p.getFileName() != null ? p.getFileName().toString() : rawPath;
+            send(exchange, 200, Map.of(
+                    "valid", true,
+                    "path", p.toAbsolutePath().toString(),
+                    "name", name,
+                    "size", size));
+        } catch (Exception e) {
+            send(exchange, 200,
+                    Map.of("valid", false, "error", e.getMessage() == null ? "Invalid path" : e.getMessage()));
+        }
+    }
+
+    private void validateDir(HttpExchange exchange) throws IOException {
+        JsonNode body = readJson(exchange);
+        String rawPath = body.has("path") ? body.get("path").asText("") : "";
+        if (rawPath.isBlank()) {
+            send(exchange, 200, Map.of("valid", false, "error", "Path is empty"));
+            return;
+        }
+        try {
+            Path p = Path.of(rawPath);
+            if (!Files.exists(p)) {
+                send(exchange, 200, Map.of("valid", false, "error", "Folder does not exist"));
+                return;
+            }
+            if (!Files.isDirectory(p)) {
+                send(exchange, 200, Map.of("valid", false, "error", "Target is not a folder"));
+                return;
+            }
+            if (!Files.isWritable(p)) {
+                send(exchange, 200, Map.of("valid", false, "error", "Folder is not writable"));
+                return;
+            }
+            long usableSpace = Files.getFileStore(p).getUsableSpace();
+            send(exchange, 200, Map.of(
+                    "valid", true,
+                    "path", p.toAbsolutePath().toString(),
+                    "usableSpace", usableSpace));
+        } catch (Exception e) {
+            send(exchange, 200,
+                    Map.of("valid", false, "error", e.getMessage() == null ? "Invalid folder path" : e.getMessage()));
+        }
+    }
+
+    private void browseFile(HttpExchange exchange) throws IOException {
+        if (GraphicsEnvironment.isHeadless()) {
+            send(exchange, 200, Map.of("selected", false, "supported", false));
+            return;
+        }
+        CompletableFuture<Map<String, Object>> future = new CompletableFuture<>();
+        EventQueue.invokeLater(() -> {
+            try {
+                Frame frame = new Frame();
+                frame.setAlwaysOnTop(true);
+                FileDialog fd = new FileDialog(frame, "Select File to Send", FileDialog.LOAD);
+                fd.setVisible(true);
+                String dir = fd.getDirectory();
+                String file = fd.getFile();
+                frame.dispose();
+                if (dir != null && file != null) {
+                    Path p = Path.of(dir, file);
+                    if (Files.isRegularFile(p) && Files.isReadable(p)) {
+                        future.complete(Map.of(
+                                "selected", true,
+                                "path", p.toAbsolutePath().toString(),
+                                "name", p.getFileName().toString(),
+                                "size", Files.size(p)));
+                        return;
+                    }
+                }
+                future.complete(Map.of("selected", false));
+            } catch (Throwable t) {
+                future.complete(Map.of("selected", false, "supported", false));
+            }
+        });
+        try {
+            Map<String, Object> result = future.get(120, TimeUnit.SECONDS);
+            send(exchange, 200, result);
+        } catch (Exception e) {
+            send(exchange, 200, Map.of("selected", false));
+        }
+    }
+
+    private void browseDir(HttpExchange exchange) throws IOException {
+        if (GraphicsEnvironment.isHeadless()) {
+            send(exchange, 200, Map.of("selected", false, "supported", false));
+            return;
+        }
+        CompletableFuture<Map<String, Object>> future = new CompletableFuture<>();
+        EventQueue.invokeLater(() -> {
+            JFrame dummyFrame = null;
+            try {
+                // 1. Create a dummy frame to host the file chooser on the OS window stack
+                dummyFrame = new JFrame();
+                dummyFrame.setAlwaysOnTop(true);
+                dummyFrame.setLocationRelativeTo(null);
+
+                // Required so the OS shifts active window focus to it immediately
+                dummyFrame.setVisible(true);
+
+                JFileChooser chooser = new JFileChooser();
+                chooser.setDialogTitle("Select Destination Folder");
+                chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+                chooser.setAcceptAllFileFilterUsed(false);
+
+                // 2. Pass the dummy frame instead of null
+                int res = chooser.showOpenDialog(dummyFrame);
+
+                if (res == JFileChooser.APPROVE_OPTION && chooser.getSelectedFile() != null) {
+                    Path p = chooser.getSelectedFile().toPath();
+                    if (Files.isDirectory(p) && Files.isWritable(p)) {
+                        future.complete(Map.of(
+                                "selected", true,
+                                "path", p.toAbsolutePath().toString()));
+                        return;
+                    }
+                }
+                future.complete(Map.of("selected", false));
+            } catch (Throwable t) {
+                future.complete(Map.of("selected", false, "supported", false));
+            } finally {
+                // 3. Clean up the window resource to prevent system hanging or leakage
+                if (dummyFrame != null) {
+                    dummyFrame.dispose();
+                }
+            }
+        });
+        try {
+            Map<String, Object> result = future.get(120, TimeUnit.SECONDS);
+            send(exchange, 200, result);
+        } catch (Exception e) {
+            send(exchange, 200, Map.of("selected", false));
         }
     }
 
@@ -395,12 +660,33 @@ public class UiApiServer {
         return MessageDigest.isEqual(expected, supplied);
     }
 
+    private boolean hostAllowed(HttpExchange ex) {
+        String host = ex.getRequestHeaders().getFirst("Host");
+        int port = server.getAddress().getPort();
+        return ("127.0.0.1:" + port).equals(host) || ("localhost:" + port).equals(host);
+    }
+
+    private void allowElectronFileOrigin(HttpExchange exchange) {
+        if ("null".equals(exchange.getRequestHeaders().getFirst("Origin"))) {
+            exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "null");
+            exchange.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+            exchange.getResponseHeaders().set("Access-Control-Allow-Headers", "Authorization, Content-Type");
+            exchange.getResponseHeaders().set("Access-Control-Max-Age", "600");
+            exchange.getResponseHeaders().set("Vary", "Origin");
+        }
+    }
+
     private static boolean isKnownPath(String path) {
         return "/api/state".equals(path)
                 || "/api/events".equals(path)
                 || "/api/send".equals(path)
                 || "/api/peers/manual".equals(path)
                 || "/api/history".equals(path)
+                || "/api/system/paths".equals(path)
+                || "/api/browse/file".equals(path)
+                || "/api/browse/dir".equals(path)
+                || "/api/validate/file".equals(path)
+                || "/api/validate/dir".equals(path)
                 || path.startsWith("/api/transfers/");
     }
 
